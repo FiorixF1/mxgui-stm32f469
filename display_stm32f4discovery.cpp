@@ -792,6 +792,11 @@ DisplayImpl::DisplayImpl()
     : framebuffer1(reinterpret_cast<unsigned short *>(0xc0000000)),
       buffer(framebuffer1 + numPixels)
 {
+    /* This driver uses DSI interface in command mode, but it was firstly programmed in video mode.
+     * For this reason some instructions are still there but they don't actually affect the driver.
+     * For example these timing parameters are important in video mode, but in command mode they can
+     * take any value and the display still works.
+     */
     const unsigned int hsync = 12;   // hsync timing
     const unsigned int vsync = 120;  // vsync timing
     const unsigned int hbp = 12;     // horizontal back porch
@@ -810,12 +815,15 @@ DisplayImpl::DisplayImpl()
         AL88 = 7
     };
     
-    // Clock stuff
+    // Parameters for DSI PLL
     // These values assume HSE oscillator is 8 MHz and system clock is 168 MHz
+    #if HSE_VALUE != 8000000
+    #error The display driver requires an HSE oscillator running at 8 MHz
+    #endif
     const unsigned int IDF = 4;     // must be in the range 1..7
     const unsigned int ODF = 1;     // must be in the set {1, 2, 4, 8}
     const unsigned int NDIV = 125;  // must be in the range 10..125
-    const unsigned int F_VCO = (8000000/IDF)*2*NDIV;            // 500 MHz - must be between 500 and 1000 MHz
+    const unsigned int F_VCO = (HSE_VALUE/IDF)*2*NDIV;          // 500 MHz - must be between 500 and 1000 MHz
     const unsigned int F_PHY_MHz = (F_VCO/(2*ODF))/1000000;     // 250 MHz - HS clock for D-PHY must be between 80 and 500 MHz
     const unsigned int lane_byte_clk = F_VCO/(2*ODF*8);         // 31,25 MHz - must be no more than 62,5 MHz
     const unsigned int TXECLKDIV = 2;                           // must be at least 2 and ensure lane_byte_clk/TXECLKDIV <= 20 MHz
@@ -874,25 +882,20 @@ DisplayImpl::DisplayImpl()
         RCC->APB2RSTR &= ~RCC_APB2RSTR_DSIRST;
     }
 
-    // Configure LTDC PLL, turn it ON and wait for its lock
+    // Configure PLLSAI for LTDC, turn it ON and wait for its lock
     {
         FastInterruptDisableLock dLock;
         
-        const unsigned int PLL_M = 4;
-        const unsigned int PLLSAI_N = 192;
+        // LTDC clock depends on PLL_M which is fixed at boot with value 8
+        // It also depends on PLLSAI which can be freely configured
+        const unsigned int PLLSAI_N = 384;
         const unsigned int PLLSAI_R = 7;
         const unsigned int PLLSAI_DIVR = 0;
         
-        // Ensure the PLL is powered by HSE oscillator @ 8 MHz
-        //RCC->PLLCFGR |= RCC_PLLCFGR_PLLSRC;
-        // Set HSE divisor factor to 4
-        // Input VCO Frequency must be between 1 and 2 MHZ, so 8/4 = 2 MHz
-        //RCC->PLLCFGR &= ~RCC_PLLCFGR_PLLM;
-        //RCC->PLLCFGR |= PLL_M;
-        
+        // Input VCO Frequency = HSE_VALUE/PPL_M must be between 1 and 2 MHZ, so 8/8 = 1 MHz
         // N must be in the range 50..432 and ensure a frequency between 100 and 432 MHz
-        // if N = 192 then 2 MHz * 192 = 384 MHz
-        // R must be in the range 2..7, we choose R = 7 so 384/7 = 54,85 MHz
+        // if N = 384 then 1 MHz * 384 = 384 MHz
+        // R must be in the range 2..7, we choose R = 7 so 384/7 = 54,857 MHz
         // and then we divide it by 2 (setting DIVR to 0) to obtain 27,428 Mhz
         
         // Read PLLSAI_P and PLLSAI_Q values from PLLSAICFGR register
@@ -973,11 +976,11 @@ DisplayImpl::DisplayImpl()
     while ((DSI->WISR & DSI_WISR_RRS) == 0);
     
     // Configure the DSI PLL, turn it ON and wait for its lock 
-    // F_VCO = (HSE / IDF) x 2 x NDIV
-    // Lane_Byte_CLK = F_VCO / (2 x ODF x 8)
+    // F_VCO = (HSE_VALUE / IDF) * 2 * NDIV
+    // Lane_Byte_CLK = F_VCO / (2 * ODF * 8)
     // F_VCO must be in the range from 500 MHz to 1 GHz
     // To obtain 500 Mbit/s rate, Lane_Byte_CLK must be 31,25 MHz
-    // Since HSE = 8 MHz this is possible with NDIV = 125, IDF = 4, ODF = 1
+    // Since HSE_VALUE = 8 MHz this is possible with NDIV = 125, IDF = 4, ODF = 1
     DSI->WRPCR &= ~(DSI_WRPCR_PLL_NDIV | DSI_WRPCR_PLL_IDF | DSI_WRPCR_PLL_ODF);
     DSI->WRPCR |= ((NDIV << 2) | (IDF << 11) | (ODF << 16));
     DSI->WRPCR |= DSI_WRPCR_PLLEN;
@@ -992,7 +995,7 @@ DisplayImpl::DisplayImpl()
     // Disable all error interrupts and reset the Error Mask
     DSI->IER[0] = 0;
     DSI->IER[1] = 0;
-    // Configure the number of active data lanes
+    // Configure the number of active data lanes (just one out of two for 16 bpp)
     DSI->PCONFR &= ~DSI_PCONFR_NL;
     DSI->PCONFR |= 1;
     // Set automatic clock lane control
@@ -1008,6 +1011,7 @@ DisplayImpl::DisplayImpl()
 
     // Configure the DSI Host timing
     //DSI->CCR |= (... << 8); // timeout clock configuration non dice nulla...
+    // Configure clock speed for low-power mode
     DSI->CCR &= ~DSI_CCR_TXECKDIV;
     DSI->CCR |= TXECLKDIV;
     
@@ -1066,7 +1070,7 @@ DisplayImpl::DisplayImpl()
     // Configure the acknowledge request after each packet transmission
     DSI->CMCR |= DSI_CMCR_ARE;
     
-    // Enable the D-PHY
+    // Enable the D-PHY data lane
     DSI->PCTLR |= DSI_PCTLR_DEN;
     
     // Enable the D-PHY clock lane
