@@ -892,7 +892,7 @@ DisplayImpl::DisplayImpl()
         const unsigned int PLLSAI_R = 7;
         const unsigned int PLLSAI_DIVR = 0;
         
-        // Input VCO Frequency = HSE_VALUE/PPL_M must be between 1 and 2 MHZ, so 8/8 = 1 MHz
+        // Input VCO Frequency = HSE_VALUE/PPL_M must be between 1 and 2 MHz, so 8/8 = 1 MHz
         // N must be in the range 50..432 and ensure a frequency between 100 and 432 MHz
         // if N = 384 then 1 MHz * 384 = 384 MHz
         // R must be in the range 2..7, we choose R = 7 so 384/7 = 54,857 MHz
