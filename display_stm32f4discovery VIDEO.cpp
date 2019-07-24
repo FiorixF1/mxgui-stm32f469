@@ -583,6 +583,8 @@ DisplayImpl& DisplayImpl::instance()
 void DisplayImpl::doTurnOn()
 {
     LTDC->GCR |= LTDC_GCR_LTDCEN;
+    DSI->CR |= DSI_CR_EN;
+    
     Thread::sleep(40);
     uint8_t set_display_on[] = {0x29, 0x00};
     sendCmd(0, set_display_on);
@@ -592,6 +594,8 @@ void DisplayImpl::doTurnOff()
 {
     uint8_t set_display_off[] = {0x28, 0x00};
     sendCmd(0, set_display_off);
+    
+    DSI->CR &= ~DSI_CR_EN;
     LTDC->GCR &= ~LTDC_GCR_LTDCEN;
 }
 
@@ -760,11 +764,6 @@ void DisplayImpl::drawRectangle(Point a, Point b, Color c)
     line(Point(a.x(),b.y()),a,c);
 }
 
-void DisplayImpl::update()
-{
-    DSI->WCR |= DSI_WCR_LTDCEN;
-}
-
 DisplayImpl::pixel_iterator DisplayImpl::begin(Point p1, Point p2,
         IteratorDirection d)
 {
@@ -792,18 +791,15 @@ DisplayImpl::DisplayImpl()
     : framebuffer1(reinterpret_cast<unsigned short *>(0xc0000000)),
       buffer(framebuffer1 + numPixels)
 {
-    /* This driver uses DSI interface in command mode, but it was firstly programmed in video mode.
-     * For this reason some instructions are still there but they don't actually affect the driver.
-     * For example these timing parameters are important in video mode, but in command mode they can
-     * take any value and the display still works.
-     */
-    const unsigned int hsync = 12;   // hsync timing
-    const unsigned int vsync = 120;  // vsync timing
-    const unsigned int hbp = 12;     // horizontal back porch
-    const unsigned int vbp = 120;    // vertical back porch
-    const unsigned int hfp = 12;     // horizontal front porch
-    const unsigned int vfp = 120;    // vertical front porch
-    const unsigned int rate = 60;    // refresh rate
+    // Timings taken from OTM8009A datasheet for resolution 480*800 with pixel clock at 24 MHz
+    const unsigned int hsync = 2;   // hsync timing
+    const unsigned int vsync = 1;   // vsync timing
+    const unsigned int hbp = 20;    // horizontal back porch
+    const unsigned int vbp = 3;     // vertical back porch
+    const unsigned int hfp = 18;    // horizontal front porch
+    const unsigned int vfp = 4;     // vertical front porch
+    const unsigned int rate = 60;   // refresh rate
+    
     enum {
         ARGB8888 = 0,
         RGB888 = 1,
@@ -820,14 +816,14 @@ DisplayImpl::DisplayImpl()
     #if HSE_VALUE != 8000000
     #error The display driver requires an HSE oscillator running at 8 MHz
     #endif
-    const unsigned int IDF = 4;     // must be in the range 1..7
+    const unsigned int IDF = 2;     // must be in the range 1..7
     const unsigned int ODF = 1;     // must be in the set {1, 2, 4, 8}
     const unsigned int NDIV = 125;  // must be in the range 10..125
-    const unsigned int F_VCO = (HSE_VALUE/IDF)*2*NDIV;          // 500 MHz - must be between 500 and 1000 MHz
-    const unsigned int F_PHY_MHz = (F_VCO/(2*ODF))/1000000;     // 250 MHz - HS clock for D-PHY must be between 80 and 500 MHz
-    const unsigned int lane_byte_clk = F_VCO/(2*ODF*8);         // 31,25 MHz - must be no more than 62,5 MHz
-    const unsigned int TXECLKDIV = 2;                           // must be at least 2 and ensure lane_byte_clk/TXECLKDIV <= 20 MHz
-    const unsigned int pixel_clock = F_VCO/bpp;                 // 31,25 MHz
+    const unsigned int F_VCO = (HSE_VALUE/IDF)*2*NDIV;          // 1 GHz - must be between 500 and 1000 MHz
+    const unsigned int F_PHY_MHz = (F_VCO/(2*ODF))/1000000;     // 500 MHz - HS clock for D-PHY must be between 80 and 500 MHz
+    const unsigned int lane_byte_clk = F_VCO/(2*ODF*8);         // 62,5 MHz - must be no more than 62,5 MHz
+    const unsigned int TXECLKDIV = 4;                           // must be at least 2 and ensure lane_byte_clk/TXECLKDIV <= 20 MHz
+    const unsigned int pixel_clock = 24000000;
     const unsigned int clock_ratio = lane_byte_clk/pixel_clock;
 
     memset(framebuffer1, 0, height*width*bpp);
@@ -888,15 +884,15 @@ DisplayImpl::DisplayImpl()
         
         // LTDC clock depends on PLL_M which is fixed at boot with value 8
         // It also depends on PLLSAI which can be freely configured
-        const unsigned int PLLSAI_N = 384;
-        const unsigned int PLLSAI_R = 7;
+        const unsigned int PLLSAI_N = 288;
+        const unsigned int PLLSAI_R = 6;
         const unsigned int PLLSAI_DIVR = 0;
         
         // Input VCO Frequency = HSE_VALUE/PPL_M must be between 1 and 2 MHz, so 8/8 = 1 MHz
         // N must be in the range 50..432 and ensure a frequency between 100 and 432 MHz
-        // if N = 384 then 1 MHz * 384 = 384 MHz
-        // R must be in the range 2..7, we choose R = 7 so 384/7 = 54,857 MHz
-        // and then we divide it by 2 (setting DIVR to 0) to obtain 27,428 Mhz
+        // if N = 288 then 1 MHz * 288 = 288 MHz
+        // R must be in the range 2..7, we choose R = 6 so 288/6 = 48 MHz
+        // and then we divide it by 2 (setting DIVR to 0) to obtain 24 MHz
         
         // Read PLLSAI_P and PLLSAI_Q values from PLLSAICFGR register
         uint32_t PLLSAI_P = ((RCC->PLLSAICFGR & RCC_PLLSAICFGR_PLLSAIP) >> 16);
@@ -979,8 +975,8 @@ DisplayImpl::DisplayImpl()
     // F_VCO = (HSE_VALUE / IDF) * 2 * NDIV
     // Lane_Byte_CLK = F_VCO / (2 * ODF * 8)
     // F_VCO must be in the range from 500 MHz to 1 GHz
-    // To obtain 500 Mbit/s rate, Lane_Byte_CLK must be 31,25 MHz
-    // Since HSE_VALUE = 8 MHz this is possible with NDIV = 125, IDF = 4, ODF = 1
+    // To obtain 1 Gbit/s rate, Lane_Byte_CLK must be 62,5 MHz
+    // Since HSE_VALUE = 8 MHz this is possible with NDIV = 125, IDF = 2, ODF = 1
     DSI->WRPCR &= ~(DSI_WRPCR_PLL_NDIV | DSI_WRPCR_PLL_IDF | DSI_WRPCR_PLL_ODF);
     DSI->WRPCR |= ((NDIV << 2) | (IDF << 11) | (ODF << 16));
     DSI->WRPCR |= DSI_WRPCR_PLLEN;
@@ -995,22 +991,22 @@ DisplayImpl::DisplayImpl()
     // Disable all error interrupts and reset the Error Mask
     DSI->IER[0] = 0;
     DSI->IER[1] = 0;
-    // Configure the number of active data lanes (just one out of two for 16 bpp)
+    // Configure the number of active data lanes (0x01 for two data lanes)
     DSI->PCONFR &= ~DSI_PCONFR_NL;
-    DSI->PCONFR |= 1;
+    DSI->PCONFR |= 0x01;
     // Set automatic clock lane control
     DSI->CLCR |= (DSI_CLCR_DPCC | DSI_CLCR_ACR);
     // Time for LP/HS and HS/LP transitions for both clock lane and data lanes
-    DSI->CLTCR |= (40 << 16)   // HS to LP
-                | (40 <<  0);  // LP to HS
-    DSI->DLTCR |= (20 << 24)   // HS to LP
-                | (20 << 16);  // HS to LP
+    DSI->CLTCR |= (28 << 16)   // HS to LP
+                | (33 <<  0);  // LP to HS
+    DSI->DLTCR |= (15 << 24)   // HS to LP
+                | (25 << 16);  // LS to HP
     // Stop wait time (don't know how much should it be, random high number in 8 bit)
     DSI->PCONFR &= ~DSI_PCONFR_SW_TIME;
-    DSI->PCONFR |= (100 << 8);
+    DSI->PCONFR |= (10 << 8);  // or 100?
 
     // Configure the DSI Host timing
-    //DSI->CCR |= (... << 8); // timeout clock configuration non dice nulla...
+    DSI->CCR |= (5 << 8); // timeout clock configuration non dice nulla...
     // Configure clock speed for low-power mode
     DSI->CCR &= ~DSI_CCR_TXECKDIV;
     DSI->CCR |= TXECLKDIV;
@@ -1029,10 +1025,13 @@ DisplayImpl::DisplayImpl()
     DSI->LPCR |= (DSI_LPCR_DEP | 0 | 0);  // Polarity of control signals: same of LTDC except for DE
     DSI->WCFGR |= DSI_WCFGR_VSPOL;  // LTDC halts at VSYNC rising edge
     
-    // Configure the DSI Host for command mode
-        // Select command mode by setting CMDM and DSIM bits 
-    DSI->MCR |= DSI_MCR_CMDM;
-    DSI->WCFGR |= DSI_WCFGR_DSIM;
+    // Configure the DSI Host for video mode
+        // Select video mode by resetting CMDM and DSIM bits
+    DSI->MCR &= ~DSI_MCR_CMDM;
+    DSI->WCFGR &= ~DSI_WCFGR_DSIM;
+        // Configure the video mode transmission type (burst mode)
+    DSI->VMCR &= ~DSI_VMCR_VMT;
+    DSI->VMCR |= 2;
         // Configure the maximum allowed size for write memory command
     DSI->LCCR &= ~DSI_LCCR_CMDSIZE;
     DSI->LCCR |= width;
@@ -1042,7 +1041,7 @@ DisplayImpl::DisplayImpl()
     DSI->VMCR |= DSI_VMCR_LPCE;  // Allow commands in LP
     DSI->VPCR |= width;  // Video packet size
     DSI->VCCR = 0;  // Chunks number to be transmitted through the DSI link
-    DSI->VNPCR |= 0xFFF;  // Size of the null packet
+    DSI->VNPCR |= 0;  // Size of the null packet
     // Timings in lane byte clock cycles
     DSI->VLCR |= (hsync + hbp + width + hfp)*clock_ratio;
     DSI->VHSACR |= hsync*clock_ratio;
@@ -1320,19 +1319,22 @@ DisplayImpl::DisplayImpl()
     DSI->PCR |= DSI_PCR_BTAE;
     
     // Enable the LTDC
-    LTDC->GCR |= LTDC_GCR_LTDCEN;
+    //LTDC->GCR |= LTDC_GCR_LTDCEN;
 
     // Start the LTDC flow through the DSI wrapper (CR.LTDCEN = 1).
     // In video mode, the data streaming starts as soon as the LTDC is enabled.
     // In adapted command mode, the frame buffer update is launched as soon as the CR.LTDCEN bit is set.
-    DSI->CR |= DSI_CR_EN;
-    
-    // Update the display
-    DSI->WCR |= DSI_WCR_LTDCEN;
+    //DSI->CR |= DSI_CR_EN;
 
+    doTurnOff();
+    doTurnOn();
+    
     setFont(droid11);
     setTextColor(make_pair(Color(0xffff), Color(0x0000)));
     clear(black);
+    
+    // Update the display
+    DSI->WCR |= DSI_WCR_LTDCEN;
 }
 
 Color DisplayImpl::pixel_iterator::dummy;
